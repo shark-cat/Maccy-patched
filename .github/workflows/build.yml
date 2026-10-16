@@ -10,8 +10,8 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
-    timeout-minutes: 45
+    runs-on: macos-26
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,9 +37,15 @@ jobs:
 
       - name: Toolchain info
         run: |
+          set -euo pipefail
           xcodebuild -version
           xcode-select -p
           sw_vers
+          echo "--- SDK ---"
+          xcrun --show-sdk-version
+          xcrun --show-sdk-path
+          echo "--- installed Xcodes ---"
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
 
       - name: Build Release (unsigned)
         run: |
