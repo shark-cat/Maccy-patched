@@ -1,0 +1,110 @@
+name: Build Maccy (2.7.0 + PR#1509)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch upstream Maccy 2.7.0 source
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 --retry-delay 2 -o src.tgz \
+            https://codeload.github.com/p0deje/Maccy/tar.gz/refs/tags/2.7.0
+          tar xzf src.tgz
+          mv Maccy-2.7.0 src
+          ls src | head
+
+      - name: Apply PR #1509 (orphaned HistoryItemContent fix)
+        run: |
+          set -euo pipefail
+          cd src
+          patch -p1 < "$GITHUB_WORKSPACE/maccy-1509-src.patch"
+          echo "--- patch verification ---"
+          grep -n "func cleanupOrphanedContents" Maccy/Storage.swift
+          grep -n "private func deleteFromStorage" Maccy/Observables/History.swift
+          grep -n "cleanup-orphaned-history-item-contents" Maccy/AppDelegate.swift
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          xcode-select -p
+          sw_vers
+
+      - name: Build Release (unsigned)
+        run: |
+          set -euo pipefail
+          cd src
+          xcodebuild \
+            -project Maccy.xcodeproj \
+            -scheme Maccy \
+            -configuration Release \
+            -derivedDataPath "$PWD/build" \
+            MARKETING_VERSION=2.7.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            build
+
+      - name: Locate Maccy.app
+        id: locate
+        run: |
+          set -euo pipefail
+          APP="$(find src/build -type d -name 'Maccy.app' -print -quit)"
+          test -n "$APP"
+          echo "app=$APP" >> "$GITHUB_OUTPUT"
+          echo "Found: $APP"
+
+      - name: Ad-hoc sign with sandbox entitlements
+        run: |
+          set -euo pipefail
+          APP="${{ steps.locate.outputs.app }}"
+          sed 's/\$(PRODUCT_BUNDLE_IDENTIFIER)/org.p0deje.Maccy/g' \
+            src/Maccy/Maccy.entitlements > "$RUNNER_TEMP/resolved.entitlements"
+          codesign --force --deep --sign - \
+            --entitlements "$RUNNER_TEMP/resolved.entitlements" "$APP"
+          echo "--- verify signature ---"
+          codesign -dv --verbose=4 "$APP" 2>&1 | sed -n '1,12p'
+          echo "--- verify entitlements ---"
+          codesign -d --entitlements - "$APP" 2>&1 | sed -n '1,20p'
+
+      - name: Sanity check bundle
+        run: |
+          set -euo pipefail
+          APP="${{ steps.locate.outputs.app }}"
+          test -f "$APP/Contents/MacOS/Maccy"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist"
+          file "$APP/Contents/MacOS/Maccy"
+          ls "$APP/Contents/Frameworks" 2>/dev/null || true
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          APP="${{ steps.locate.outputs.app }}"
+          mkdir -p out
+          ditto -c -k --keepParent "$APP" out/Maccy-patched.app.zip
+          shasum -a 256 out/Maccy-patched.app.zip | tee out/sha256.txt
+          ls -lh out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Maccy-patched
+          path: |
+            out/Maccy-patched.app.zip
+            out/sha256.txt
+          if-no-files-found: error
+          retention-days: 5
